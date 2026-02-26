@@ -13,6 +13,12 @@ jobs:
     name: Native Build (LibCore)
     runs-on: ubuntu-latest
     steps:
+      - name: Check Ubuntu System Version
+        run: |
+          echo "=== Ubuntu System Information ==="
+          lsb_release -a
+          echo "Kernel: $(uname -r)"
+          echo "=== End System Information ==="
       - name: Checkout
         uses: actions/checkout@v4
       - name: Golang Status
