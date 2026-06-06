@@ -4674,10 +4674,24 @@ public class SingBoxOptions {
         // Advanced field from extra config
         public com.google.gson.JsonElement download;
         public com.google.gson.JsonElement xmux;
+        public Map<String, String> headers;
         public com.google.gson.JsonElement x_padding_bytes;
         public com.google.gson.JsonElement no_grpc_header;
         public com.google.gson.JsonElement sc_max_each_post_bytes;
         public com.google.gson.JsonElement sc_min_posts_interval_ms;
+        public com.google.gson.JsonElement x_padding_obfs_mode;
+        public com.google.gson.JsonElement x_padding_key;
+        public com.google.gson.JsonElement x_padding_header;
+        public com.google.gson.JsonElement x_padding_placement;
+        public com.google.gson.JsonElement x_padding_method;
+        public com.google.gson.JsonElement uplink_http_method;
+        public com.google.gson.JsonElement session_placement;
+        public com.google.gson.JsonElement session_key;
+        public com.google.gson.JsonElement seq_placement;
+        public com.google.gson.JsonElement seq_key;
+        public com.google.gson.JsonElement uplink_data_placement;
+        public com.google.gson.JsonElement uplink_data_key;
+        public com.google.gson.JsonElement uplink_chunk_size;
 
     }
 
@@ -4696,6 +4710,8 @@ public class SingBoxOptions {
         public Integer read_buffer_size;
 
         public Integer write_buffer_size;
+
+        public Integer cwnd_multiplier;
 
         public String header_type;
 
@@ -4753,6 +4769,61 @@ public class SingBoxOptions {
         public String idle_session_check_interval;
 
         public String idle_session_timeout;
+
+    }
+
+    public static class Outbound_SnellOptions extends Outbound {
+
+        // Generate note: nested type DialerOptions
+        public String detour;
+
+        public String bind_interface;
+
+        public String inet4_bind_address;
+
+        public String inet6_bind_address;
+
+        public String protect_path;
+
+        public Integer routing_mark;
+
+        public Boolean reuse_addr;
+
+        public String connect_timeout;
+
+        public Boolean tcp_fast_open;
+
+        public Boolean tcp_multi_path;
+
+        public Boolean udp_fragment;
+
+        public String domain_strategy;
+
+        public String network_strategy;
+
+        public List<String> network_type;
+
+        public List<String> fallback_network_type;
+
+        public String fallback_delay;
+
+        // Generate note: nested type ServerOptions
+        public String server;
+
+        public Integer server_port;
+
+        // Snell specific options
+        public String psk;
+
+        public Integer version;
+
+        public String network;
+
+        public String obfs_mode;
+
+        public String obfs_host;
+
+        public Boolean reuse;
 
     }
 
