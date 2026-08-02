@@ -75,7 +75,7 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
             return MaterialAboutList.Builder()
                 .addCard(
                     MaterialAboutCard.Builder()
-                        .outline(false)
+                        .outline(true)
                         .addItem(
                             MaterialAboutActionItem.Builder()
                                 .icon(R.drawable.ic_baseline_update_24)
@@ -175,7 +175,7 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                         .build())
                 .addCard(
                     MaterialAboutCard.Builder()
-                        .outline(false)
+                        .outline(true)
                         .title(R.string.project)
                         .addItem(
                             MaterialAboutActionItem.Builder()
@@ -216,7 +216,11 @@ class AboutFragment : ToolbarFragment(R.layout.layout_about) {
                 try {
                     val client = Libcore.newHttpClient().apply {
                         modernTLS()
-                        trySocks5(DataStore.mixedPort)
+                        trySocks5(
+                            DataStore.mixedPort,
+                            DataStore.mixedInboundUser,
+                            DataStore.mixedInboundPass
+                        )
                     }
                     val response = client.newRequest().apply {
                         if (checkPreview) {

@@ -38,7 +38,10 @@
     <string name="layout">Layout</string>
     <string name="layout_single_column">Single column</string>
     <string name="layout_double_column">Double column</string>
-    <string name="sort_and_layout">Sort and Layout</string>
+    <string name="sort_and_layout">Sort and Appearance</string>
+    <string name="card_style">Card</string>
+    <string name="card_style_classic">Classic</string>
+    <string name="card_style_stroke">Stroke</string>
     <string name="group_status_empty">Empty group</string>
     <string name="group_status_empty_subscription">Not updated yet</string>
     <string name="group_status_proxies">%d Proxies</string>
@@ -99,6 +102,7 @@
     <string name="fakedns_message">May cause other applications need to be restarted to reconnect to
         the network after proxy stopped</string>
     <string name="dns_hosts">Domain rewrite</string>
+    <string name="dns_hosts_dialog_message">One per line. Lines starting with # are comments. Example:\nexample.com 1.1.1.1\nwww.example.com 1.1.1.1 1.1.1.2</string>
     <string name="port_local_dns">Local DNS Port</string>
     <string name="require_transproxy">Enable Transproxy Inbound</string>
     <string name="transproxy_mode">Transproxy Mode</string>
@@ -324,6 +328,7 @@
         otherwise you may not be able to connect to the Internet.</string>
     <string name="lines">%d Lines</string>
     <string name="night_mode">Night Mode</string>
+    <string name="language">Language</string>
     <string name="follow_system">Follow System</string>
     <string name="enable">Enable</string>
     <string name="disable">Disable</string>
@@ -357,6 +362,11 @@
     <string name="append_http_proxy">Append HTTP Proxy to VPN</string>
     <string name="append_http_proxy_sum">HTTP proxy will be used directly from (browser/ some
         supported apps), without going through the virtual NIC device (Android 10+)</string>
+    <string name="http_proxy_bypass">HTTP proxy bypass list</string>
+    <string name="http_proxy_bypass_dialog_message">One per line. Lines starting with # are comments. Example: *zhihu.com</string>
+    <string name="append_http_proxy_security_title">Security Notice</string>
+    <string name="append_http_proxy_security_message">When enabled, other apps on this device can directly use the local proxy port.\n\nRecommendation: Only enable this if you trust all installed apps.</string>
+    <string name="enable_anyway">Enable Anyway</string>
     <string name="strict_route">Strict Route</string>
     <string name="protocol_settings">Protocol Settings</string>
     <string name="trojan_provider">Trojan Provider</string>
@@ -403,6 +413,9 @@
     <string name="subscription_update">Subscription Update</string>
     <string name="subscription_update_message">Updating %s …</string>
     <string name="group_filter">Filter</string>
+    <string name="server_dns">Custom Server DNS</string>
+    <string name="server_dns_subscription_sum">Optional DNS used only to resolve server domains in this subscription. Leave empty to use the default behavior. Accepts https://, tls://, quic:// or host[:port].</string>
+    <string name="server_dns_invalid">Invalid custom server DNS. Use https://, tls://, quic:// or host[:port], or leave empty.</string>
     <string name="subscription_used">%s Used</string>
     <string name="subscription_traffic">%s Used / %s Remaining</string>
     <string name="subscription_expire">Expire: %s</string>
@@ -665,12 +678,14 @@
 
     <!-- Snell Protocol -->
     <string name="action_snell">Snell</string>
-    <string name="snell_psk">密钥</string>
-    <string name="snell_version">版本</string>
-    <string name="snell_network">协议</string>
-    <string name="snell_obfs_mode">Obfs 模式</string>
-    <string name="snell_obfs_host">Obfs 主机</string>
+    <string name="snell_psk">Pre-shared Key</string>
+    <string name="snell_userkey">User Key</string>
+    <string name="snell_version">Version</string>
+    <string name="snell_network">Network</string>
+    <string name="snell_obfs_mode">Obfs Mode</string>
+    <string name="snell_obfs_host">Obfs Host</string>
+    <string name="snell_mode">Mode</string>
     <string name="snell_reuse">Reuse</string>
-    <string name="snell_reuse_summary">v4/v5 only</string>
+    <string name="snell_reuse_summary">v4-v6 only</string>
 
 </resources>

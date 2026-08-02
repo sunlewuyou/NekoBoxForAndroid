@@ -140,6 +140,12 @@ class BaseService {
             callbacks.unregister(cb)
         }
 
+        override fun resetTraffic(profileIds: LongArray) {
+            launch(Dispatchers.Default) {
+                data?.proxy?.looper?.resetTraffic(profileIds)
+            }
+        }
+
         override fun urlTest(): Int {
             if (data?.proxy?.box == null) {
                 error("core not started")
@@ -236,6 +242,7 @@ class BaseService {
         fun stopRunner(restart: Boolean = false, msg: String? = null) {
             DataStore.baseService = null
             DataStore.vpnService = null
+            DataStore.mixedInboundAuthed = false
 
             if (data.state == State.Stopping) return
             data.notification?.destroy()

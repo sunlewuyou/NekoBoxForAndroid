@@ -14,6 +14,7 @@ object Key {
     const val APP_EXPERT = "isExpert"
     const val APP_THEME = "appTheme"
     const val NIGHT_THEME = "nightTheme"
+    const val APP_LANGUAGE = "appLanguage"
     const val SERVICE_MODE = "serviceMode"
     const val MODE_VPN = "vpn"
     const val MODE_PROXY = "proxy"
@@ -40,11 +41,15 @@ object Key {
     const val CONCURRENT_DIAL = "concurrentDial"
 
     const val MIXED_PORT = "mixedPort"
+    const val MIXED_SECRET = "mixedSecret" // storage key for the generated inbound secret
+    const val MIXED_USERNAME = "neko" // username presented to the authed mixed inbound
     const val ALLOW_ACCESS = "allowAccess"
     const val SPEED_INTERVAL = "speedInterval"
     const val SHOW_DIRECT_SPEED = "showDirectSpeed"
 
     const val APPEND_HTTP_PROXY = "appendHttpProxy"
+    const val HTTP_PROXY_BYPASS = "httpProxyBypass"
+    const val DNS_HOSTS = "dnsHosts"
     const val STRICT_ROUTE = "strictRoute"
 
     const val CONNECTION_TEST_URL = "connectionTestURL"
@@ -70,6 +75,7 @@ object Key {
     const val SHOW_BOTTOM_BAR = "showBottomBar"
     const val CONFIRM_PROFILE_DELETE = "confirmProfileDelete"
     const val GROUP_LAYOUT_MODE = "groupLayoutMode"
+    const val PROFILE_CARD_STYLE = "profileCardStyle"
 
     const val ALLOW_INSECURE_ON_REQUEST = "allowInsecureOnRequest"
 
@@ -167,6 +173,7 @@ object Key {
     const val SUBSCRIPTION_AUTO_UPDATE_DELAY = "subscriptionAutoUpdateDelay"
     const val SUBSCRIPTION_FILTER_MODE = "subscriptionFilterMode"
     const val SUBSCRIPTION_FILTER_REGEX = "subscriptionFilterRegex"
+    const val SUBSCRIPTION_SERVER_DNS = "subscriptionServerDns"
 
     //
 

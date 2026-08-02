@@ -1,6 +1,5 @@
 package io.nekohasekai.sagernet.ui
 
-import android.content.DialogInterface
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Color
@@ -16,7 +15,9 @@ import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuItem
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -25,18 +26,21 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.PopupMenu
 import androidx.appcompat.widget.SearchView
 import androidx.appcompat.widget.Toolbar
+import androidx.core.graphics.ColorUtils
 import androidx.core.net.toUri
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.core.view.size
 import kotlinx.coroutines.delay
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceDataStore
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import androidx.viewpager2.widget.ViewPager2
+import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
@@ -100,14 +104,18 @@ import io.nekohasekai.sagernet.ui.profile.VMessSettingsActivity
 import io.nekohasekai.sagernet.ui.profile.WireGuardSettingsActivity
 import io.nekohasekai.sagernet.widget.QRCodeDialog
 import io.nekohasekai.sagernet.widget.UndoSnackbarManager
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import moe.matsuri.nb4a.Protocols
 import moe.matsuri.nb4a.Protocols.getProtocolColor
 import moe.matsuri.nb4a.proxy.anytls.AnyTLSSettingsActivity
@@ -121,10 +129,12 @@ import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipInputStream
 import kotlin.collections.set
 import androidx.appcompat.app.AlertDialog
 import io.nekohasekai.sagernet.database.SubscriptionBean
+import kotlin.math.abs
 
 class ConfigurationFragment @JvmOverloads constructor(
     val select: Boolean = false, val selectedItem: ProxyEntity? = null, val titleRes: Int = 0
@@ -144,6 +154,113 @@ class ConfigurationFragment @JvmOverloads constructor(
 
     val alwaysShowAddress by lazy { DataStore.alwaysShowAddress }
 
+    @Volatile
+    private var selectedProxySnapshot = selectedItem?.id ?: 0L
+
+    @Volatile
+    private var currentProfileSnapshot = 0L
+
+    @Volatile
+    private var serviceStartedSnapshot = DataStore.serviceState.started
+
+    private data class ProfileStateSnapshot(
+        val selectedProxy: Long,
+        val currentProfile: Long,
+        val serviceStarted: Boolean,
+    )
+
+    private val profileStateRequests = Channel<Long>(Channel.CONFLATED)
+    private val profileStateGeneration = AtomicLong()
+    private val profileStateInitialized = CompletableDeferred<Unit>()
+
+    fun refreshProfileState() {
+        lifecycleScope.launch(Dispatchers.Main.immediate) {
+            val generation = profileStateGeneration.incrementAndGet()
+            profileStateRequests.trySend(generation)
+        }
+    }
+
+    private fun updateSelectedProxySnapshot(profileId: Long) {
+        val generation = profileStateGeneration.incrementAndGet()
+        updateProfileStateSnapshots(
+            profileId,
+            currentProfileSnapshot,
+            DataStore.serviceState.started,
+        )
+        profileStateRequests.trySend(generation)
+    }
+
+    private fun startProfileStateActor() {
+        lifecycleScope.launch(Dispatchers.Main.immediate) {
+            for (generation in profileStateRequests) {
+                val snapshot = try {
+                    withContext(Dispatchers.IO) {
+                        ProfileStateSnapshot(
+                            selectedProxy = selectedItem?.id ?: DataStore.selectedProxy,
+                            currentProfile = DataStore.currentProfile,
+                            serviceStarted = DataStore.serviceState.started,
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logs.w(e)
+                    if (generation == profileStateGeneration.get()) {
+                        profileStateInitialized.complete(Unit)
+                    }
+                    continue
+                }
+                if (generation != profileStateGeneration.get()) continue
+                updateProfileStateSnapshots(
+                    snapshot.selectedProxy,
+                    snapshot.currentProfile,
+                    snapshot.serviceStarted,
+                )
+                profileStateInitialized.complete(Unit)
+            }
+        }
+    }
+
+    private fun updateProfileStateSnapshots(
+        selectedProxy: Long,
+        currentProfile: Long,
+        serviceStarted: Boolean,
+    ) {
+        val changedIds = mutableSetOf<Long>()
+        if (selectedProxySnapshot != selectedProxy) {
+            changedIds.add(selectedProxySnapshot)
+            changedIds.add(selectedProxy)
+        }
+        if (currentProfileSnapshot != currentProfile) {
+            changedIds.add(currentProfileSnapshot)
+            changedIds.add(currentProfile)
+        }
+        if (serviceStartedSnapshot != serviceStarted) {
+            changedIds.add(selectedProxySnapshot)
+            changedIds.add(currentProfileSnapshot)
+            changedIds.add(selectedProxy)
+            changedIds.add(currentProfile)
+        }
+        changedIds.removeAll { it <= 0L }
+
+        selectedProxySnapshot = selectedProxy
+        currentProfileSnapshot = currentProfile
+        serviceStartedSnapshot = serviceStarted
+
+        if (changedIds.isEmpty() || !::adapter.isInitialized) return
+        adapter.groupFragments.values.forEach { fragment ->
+            fragment.adapter?.refreshProfileState(changedIds)
+        }
+    }
+
+    private fun isSelectedProfile(profileId: Long) = selectedProxySnapshot == profileId
+
+    private fun isCurrentProfile(profileId: Long) = currentProfileSnapshot == profileId
+
+    private fun isCurrentGroupPagerAdapter(candidate: GroupPagerAdapter): Boolean {
+        return ::adapter.isInitialized && adapter === candidate
+    }
+
     fun getCurrentGroupFragment(): GroupFragment? {
         return try {
             childFragmentManager.findFragmentByTag("f" + DataStore.selectedGroup) as GroupFragment?
@@ -157,6 +274,14 @@ class ConfigurationFragment @JvmOverloads constructor(
         adapter.groupFragments.values.forEach { fragment ->
             if (fragment.isAdded && fragment.view != null) {
                 fragment.switchLayoutMode()
+            }
+        }
+    }
+
+    fun refreshAllGroupFragmentsCardStyle() {
+        adapter.groupFragments.values.forEach { fragment ->
+            if (fragment.isAdded && fragment.view != null) {
+                fragment.adapter?.notifyDataSetChanged()
             }
         }
     }
@@ -182,6 +307,8 @@ class ConfigurationFragment @JvmOverloads constructor(
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setHasOptionsMenu(true)
+        startProfileStateActor()
+        refreshProfileState()
 
         if (savedInstanceState != null) {
             parentFragmentManager.beginTransaction()
@@ -521,6 +648,7 @@ class ConfigurationFragment @JvmOverloads constructor(
             }
 
             R.id.action_clear_traffic_statistics -> {
+                val trafficService = (activity as? MainActivity)?.connection?.service
                 runOnDefaultDispatcher {
                     val profiles = SagerDatabase.proxyDao.getByGroup(DataStore.currentGroupId())
                     val toClear = mutableListOf<ProxyEntity>()
@@ -533,6 +661,14 @@ class ConfigurationFragment @JvmOverloads constructor(
                     }
                     if (toClear.isNotEmpty()) {
                         ProfileManager.updateProfile(toClear)
+                    }
+                    try {
+                        trafficService?.resetTraffic(profiles.map { it.id }.toLongArray())
+                    } catch (e: Exception) {
+                        Logs.w(e)
+                    }
+                    onMainDispatcher {
+                        getCurrentGroupFragment()?.adapter?.clearTrafficStatistics()
                     }
                 }
             }
@@ -551,6 +687,9 @@ class ConfigurationFragment @JvmOverloads constructor(
                     }
                     if (toClear.isNotEmpty()) {
                         ProfileManager.updateProfile(toClear)
+                    }
+                    onMainDispatcher {
+                        getCurrentGroupFragment()?.adapter?.clearTestResults()
                     }
                 }
             }
@@ -1003,8 +1142,10 @@ class ConfigurationFragment @JvmOverloads constructor(
         var selectedGroupIndex = 0
         var groupList: ArrayList<ProxyGroup> = ArrayList()
         var groupFragments: HashMap<Long, GroupFragment> = HashMap()
+        private val reloadGeneration = AtomicLong()
 
         fun reload(now: Boolean = false) {
+            val generation = reloadGeneration.incrementAndGet()
 
             if (!select) {
                 groupPager.unregisterOnPageChangeCallback(updateSelectedCallback)
@@ -1022,11 +1163,12 @@ class ConfigurationFragment @JvmOverloads constructor(
                     }
                 }
 
+                if (generation != reloadGeneration.get()) return@runOnDefaultDispatcher
+
                 var selectedGroup = selectedItem?.groupId ?: DataStore.currentGroupId()
-                var set = false
+                var newSelectedGroupIndex: Int? = null
                 if (selectedGroup > 0L) {
-                    selectedGroupIndex = newGroupList.indexOfFirst { it.id == selectedGroup }
-                    set = true
+                    newSelectedGroupIndex = newGroupList.indexOfFirst { it.id == selectedGroup }
                 } else if (groupList.size == 1) {
                     selectedGroup = groupList[0].id
                     if (DataStore.selectedGroup != selectedGroup) {
@@ -1036,15 +1178,34 @@ class ConfigurationFragment @JvmOverloads constructor(
 
                 val runFunc = if (now) activity?.let { it::runOnUiThread } else groupPager::post
                 if (runFunc != null) {
+                    val reloadAdapter = this@GroupPagerAdapter
                     runFunc {
-                        groupList = newGroupList
-                        notifyDataSetChanged()
-                        if (set) groupPager.setCurrentItem(selectedGroupIndex, false)
-                        val hideTab = groupList.size < 2
-                        tabLayout.isGone = hideTab
-                        toolbar.elevation = if (hideTab) 0F else dp2px(4).toFloat()
-                        if (!select) {
-                            groupPager.registerOnPageChangeCallback(updateSelectedCallback)
+                        val viewOwner = viewLifecycleOwnerLiveData.value
+                        if (generation == reloadGeneration.get() && viewOwner != null &&
+                            isCurrentGroupPagerAdapter(reloadAdapter)
+                        ) {
+                            viewOwner.lifecycleScope.launch(Dispatchers.Main.immediate) {
+                                profileStateInitialized.await()
+                                if (generation != reloadGeneration.get() ||
+                                    viewLifecycleOwnerLiveData.value !== viewOwner ||
+                                    !isCurrentGroupPagerAdapter(reloadAdapter)
+                                ) {
+                                    return@launch
+                                }
+                                refreshProfileState()
+                                newSelectedGroupIndex?.let { selectedGroupIndex = it }
+                                groupList = newGroupList
+                                notifyDataSetChanged()
+                                if (newSelectedGroupIndex != null) {
+                                    groupPager.setCurrentItem(selectedGroupIndex, false)
+                                }
+                                val hideTab = groupList.size < 2
+                                tabLayout.isGone = hideTab
+                                toolbar.elevation = if (hideTab) 0F else dp2px(4).toFloat()
+                                if (!select) {
+                                    groupPager.registerOnPageChangeCallback(updateSelectedCallback)
+                                }
+                            }
                         }
                     }
                 }
@@ -1118,7 +1279,7 @@ class ConfigurationFragment @JvmOverloads constructor(
             }
         }
 
-        override suspend fun onUpdated(data: TrafficData) = Unit
+        override suspend fun onUpdated(data: List<TrafficData>) = Unit
 
         override suspend fun onUpdated(profile: ProxyEntity, noTraffic: Boolean) = Unit
 
@@ -1170,7 +1331,9 @@ class ConfigurationFragment @JvmOverloads constructor(
 
         lateinit var layoutManager: RecyclerView.LayoutManager
         private lateinit var itemTouchHelper: ItemTouchHelper
-        
+        private val alwaysShowAddress: Boolean
+            get() = (parentFragment as? ConfigurationFragment)?.alwaysShowAddress == true
+
         private fun setupItemTouchHelper() {
             if (select) return
             
@@ -1236,6 +1399,7 @@ class ConfigurationFragment @JvmOverloads constructor(
                     super.clearView(recyclerView, viewHolder)
                     adapter?.commitMove()
                 }
+
             })
             itemTouchHelper.attachToRecyclerView(configurationListView)
         }
@@ -1341,8 +1505,31 @@ class ConfigurationFragment @JvmOverloads constructor(
                 }
                 true
             }
+
+            val cardClassic = menu.findItem(R.id.action_card_style_classic)
+            val cardStroke = menu.findItem(R.id.action_card_style_stroke)
+            when (DataStore.profileCardStyle) {
+                1 -> cardStroke.isChecked = true
+                else -> cardClassic.isChecked = true
+            }
+            cardClassic.setOnMenuItemClickListener {
+                it.isChecked = true
+                if (DataStore.profileCardStyle != 0) {
+                    DataStore.profileCardStyle = 0
+                    (parentFragment as? ConfigurationFragment)?.refreshAllGroupFragmentsCardStyle()
+                }
+                true
+            }
+            cardStroke.setOnMenuItemClickListener {
+                it.isChecked = true
+                if (DataStore.profileCardStyle != 1) {
+                    DataStore.profileCardStyle = 1
+                    (parentFragment as? ConfigurationFragment)?.refreshAllGroupFragmentsCardStyle()
+                }
+                true
+            }
         }
-        
+
         private fun setupLayoutManager() {
             layoutManager = if (DataStore.groupLayoutMode == 1) {
                 FixedGridLayoutManager(configurationListView, 2)
@@ -1371,12 +1558,48 @@ class ConfigurationFragment @JvmOverloads constructor(
             GroupManager.addListener(adapter!!)
             configurationListView.adapter = adapter
             configurationListView.setItemViewCacheSize(20)
+            configurationListView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                        adapter?.flushPendingTrafficUpdates()
+                    }
+                }
+            })
 
             if (!select) {
                 undoManager = UndoSnackbarManager(activity as MainActivity, adapter!!)
                 setupItemTouchHelper()
+                setupBottomBarScrollDriver()
             }
+        }
 
+        private fun setupBottomBarScrollDriver() {
+            val mainActivity = activity as? MainActivity ?: return
+            configurationListView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    if (dy != 0) mainActivity.driveBottomBar(dy)
+                }
+            })
+
+            val touchSlop = ViewConfiguration.get(requireContext()).scaledTouchSlop
+            var lastRawY = 0f
+            configurationListView.setOnTouchListener { recyclerView, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> lastRawY = event.rawY
+                    MotionEvent.ACTION_MOVE -> {
+                        val cannotScroll = !recyclerView.canScrollVertically(-1) &&
+                                !recyclerView.canScrollVertically(1)
+                        if (cannotScroll) {
+                            val fingerDy = event.rawY - lastRawY
+                            if (abs(fingerDy) >= touchSlop) {
+                                mainActivity.driveBottomBar(-fingerDy.toInt())
+                                lastRawY = event.rawY
+                            }
+                        }
+                    }
+                }
+                false
+            }
         }
 
         override fun onDestroy() {
@@ -1402,6 +1625,8 @@ class ConfigurationFragment @JvmOverloads constructor(
 
             var configurationIdList: MutableList<Long> = mutableListOf()
             val configurationList = HashMap<Long, ProxyEntity>()
+            private val pendingTrafficUpdates = HashSet<Long>()
+            private val profileStatePayload = Any()
 
             private fun getItem(profileId: Long): ProxyEntity {
                 var profile = configurationList[profileId]
@@ -1415,6 +1640,36 @@ class ConfigurationFragment @JvmOverloads constructor(
             }
 
             private fun getItemAt(index: Int) = getItem(configurationIdList[index])
+
+            private fun hasMiddleRow(p: ProxyEntity): Boolean {
+                val showTraffic = p.rx + p.tx != 0L
+                val bean = p.requireBean()
+                val address = if (alwaysShowAddress && bean.name.isNotBlank()) {
+                    bean.displayAddress()
+                } else ""
+                return !((!showTraffic || p.status <= 0) && address.isBlank())
+            }
+
+            fun neighbourHasMiddleRow(position: Int): Boolean {
+                if (position == RecyclerView.NO_POSITION) return false
+                val lm = (layoutManager as? FixedGridLayoutManager) ?: return false
+                val spanCount = lm.spanCount
+                val rowCount = lm.rowIndexOf(position)
+                var rowMax = (rowCount + 1) * spanCount - 1
+                if (rowMax >= itemCount) rowMax = itemCount - 1
+                var rowStart = rowCount * spanCount
+                if (rowStart < 0) rowStart = 0
+                for (i in rowStart..rowMax) {
+                    if (i == position) continue
+                    if (try {
+                            hasMiddleRow(getItemAt(i))
+                        } catch (e: Exception) {
+                            false
+                        }
+                    ) return true
+                }
+                return false
+            }
 
             override fun onCreateViewHolder(
                 parent: ViewGroup,
@@ -1437,8 +1692,122 @@ class ConfigurationFragment @JvmOverloads constructor(
                 }
             }
 
+            override fun onBindViewHolder(
+                holder: ConfigurationHolder,
+                position: Int,
+                payloads: List<Any>,
+            ) {
+                if (payloads.isNotEmpty() && payloads.all { it === profileStatePayload }) {
+                    try {
+                        holder.bindProfileState(getItemAt(position))
+                    } catch (ignored: NullPointerException) { // when group deleted
+                    }
+                } else {
+                    onBindViewHolder(holder, position)
+                }
+            }
+
+            override fun onViewRecycled(holder: ConfigurationHolder) {
+                holder.lastSelfHasMiddleRow = null
+                holder.lastBoundTx = Long.MIN_VALUE
+                holder.lastBoundRx = Long.MIN_VALUE
+            }
+
+            override fun onViewAttachedToWindow(holder: ConfigurationHolder) {
+                super.onViewAttachedToWindow(holder)
+                val profileId = holder.itemId
+                val cached = configurationList[profileId] ?: return
+                if (holder.lastBoundTx == cached.tx && holder.lastBoundRx == cached.rx) return
+                if (configurationListView.scrollState != RecyclerView.SCROLL_STATE_IDLE) {
+                    pendingTrafficUpdates.add(profileId)
+                    return
+                }
+                updateVisibleTraffic(profileId, holder)
+            }
+
+            private fun updateVisibleTraffic(
+                profileId: Long,
+                visibleHolder: ConfigurationHolder? = null,
+            ) {
+                val cached = configurationList[profileId] ?: return
+                val holder = if (visibleHolder != null) {
+                    visibleHolder
+                } else {
+                    configurationListView.findViewHolderForItemId(profileId)
+                        as? ConfigurationHolder ?: return
+                }
+                if (holder.lastBoundTx == cached.tx && holder.lastBoundRx == cached.rx) return
+
+                val index = holder.bindingAdapterPosition
+                val previousHasMiddleRow = holder.lastSelfHasMiddleRow
+                val previouslyShowedTraffic = holder.lastBoundTx != Long.MIN_VALUE &&
+                        holder.lastBoundRx != Long.MIN_VALUE &&
+                        holder.lastBoundTx + holder.lastBoundRx != 0L
+                val showTraffic = cached.tx + cached.rx != 0L
+
+                if (previousHasMiddleRow == null || previouslyShowedTraffic != showTraffic) {
+                    holder.bind(cached)
+                } else if (showTraffic) {
+                    holder.bindTraffic(cached)
+                }
+
+                if (index != RecyclerView.NO_POSITION && previousHasMiddleRow != null &&
+                    previousHasMiddleRow != holder.lastSelfHasMiddleRow
+                ) {
+                    refreshSameRowNeighbours(index)
+                }
+            }
+
+            fun flushPendingTrafficUpdates() {
+                if (pendingTrafficUpdates.isEmpty()) return
+                for (index in 0 until configurationListView.childCount) {
+                    val holder = configurationListView.getChildViewHolder(
+                        configurationListView.getChildAt(index)
+                    ) as? ConfigurationHolder ?: continue
+                    val profileId = holder.itemId
+                    if (profileId in pendingTrafficUpdates) {
+                        updateVisibleTraffic(profileId, holder)
+                    }
+                }
+                pendingTrafficUpdates.clear()
+            }
+
+            fun refreshSameRowNeighbours(position: Int) {
+                if (position == RecyclerView.NO_POSITION) return
+                val lm = (layoutManager as? FixedGridLayoutManager) ?: return
+                val spanCount = lm.spanCount
+                val rowCount = lm.rowIndexOf(position)
+                var rowMax = (rowCount + 1) * spanCount - 1
+                if (rowMax >= itemCount) rowMax = itemCount - 1
+                var rowStart = rowCount * spanCount
+                if (rowStart < 0) rowStart = 0
+                configurationListView.post {
+                    for (i in rowStart..rowMax) {
+                        if (i == position) continue
+                        notifyItemChanged(i)
+                    }
+                }
+            }
+
+            fun refreshFromPosition(startPosition: Int) {
+                if (layoutManager !is FixedGridLayoutManager) return
+                val start = startPosition.coerceAtLeast(0)
+                if (start >= itemCount) return
+                val count = itemCount - start
+                configurationListView.post {
+                    notifyItemRangeChanged(start, count)
+                }
+            }
+
             override fun getItemCount(): Int {
                 return configurationIdList.size
+            }
+
+            fun refreshProfileState(profileIds: Set<Long>) {
+                profileIds.forEach { profileId ->
+                    val index = configurationIdList.indexOf(profileId)
+                    if (index >= 0) notifyItemChanged(index, profileStatePayload)
+                }
             }
 
             private val updated = HashSet<ProxyEntity>()
@@ -1460,8 +1829,8 @@ class ConfigurationFragment @JvmOverloads constructor(
 
             fun move(from: Int, to: Int) {
                 if (from == to) return
-                
-                if (DataStore.groupLayoutMode == 1) {
+
+                if (layoutManager is FixedGridLayoutManager) {
                     moveDualColumn(from, to)
                 } else {
                     moveLinear(from, to)
@@ -1509,12 +1878,39 @@ class ConfigurationFragment @JvmOverloads constructor(
             fun commitMove() = runOnDefaultDispatcher {
                 updated.forEach { SagerDatabase.proxyDao.updateProxy(it) }
                 updated.clear()
+                onMainDispatcher {
+                    if (layoutManager is FixedGridLayoutManager) {
+                        notifyDataSetChanged()
+                    }
+                }
+            }
+
+            fun clearTrafficStatistics() {
+                for (profile in configurationList.values) {
+                    if (profile.tx != 0L || profile.rx != 0L) {
+                        profile.tx = 0
+                        profile.rx = 0
+                    }
+                }
+                notifyDataSetChanged()
+            }
+
+            fun clearTestResults() {
+                for (profile in configurationList.values) {
+                    if (profile.status != 0) {
+                        profile.status = 0
+                        profile.ping = 0
+                        profile.error = null
+                    }
+                }
+                notifyDataSetChanged()
             }
 
             fun remove(pos: Int) {
                 if (pos < 0) return
                 configurationIdList.removeAt(pos)
                 notifyItemRemoved(pos)
+                refreshFromPosition(pos - 1)
             }
 
             override fun undo(actions: List<Pair<Int, ProxyEntity>>) {
@@ -1523,6 +1919,7 @@ class ConfigurationFragment @JvmOverloads constructor(
                         configurationList[item.id] = item
                         configurationIdList.add(index, item.id)
                         notifyItemInserted(index)
+                        refreshFromPosition(index - 1)
                     }
                 }
             }
@@ -1547,44 +1944,62 @@ class ConfigurationFragment @JvmOverloads constructor(
                     configurationList[profile.id] = profile
                     configurationIdList.add(profile.id)
                     notifyItemInserted(pos)
+                    refreshFromPosition(pos - 1)
                 }
             }
 
             override suspend fun onUpdated(profile: ProxyEntity, noTraffic: Boolean) {
                 if (profile.groupId != proxyGroup.id) return
+                if (noTraffic) {
+                    (parentFragment as? ConfigurationFragment)?.refreshProfileState()
+                }
                 val index = configurationIdList.indexOf(profile.id)
                 if (index < 0) return
                 configurationListView.post {
                     if (::undoManager.isInitialized) {
                         undoManager.flush()
                     }
-                    configurationList[profile.id] = profile
+                    val cachedProfile = configurationList[profile.id]
+                    val updatedProfile = if (noTraffic && cachedProfile != null) {
+                        profile.copy(
+                            tx = cachedProfile.tx,
+                            rx = cachedProfile.rx,
+                        ).also { it.dirty = profile.dirty }
+                    } else {
+                        profile
+                    }
+                    val contentChanged = !noTraffic ||
+                            cachedProfile == null ||
+                            cachedProfile != updatedProfile ||
+                            cachedProfile.dirty != updatedProfile.dirty ||
+                            cachedProfile.displayName() != updatedProfile.displayName()
+                    configurationList[profile.id] = updatedProfile
+                    if (noTraffic && !contentChanged) return@post
+
+                    val newHasMiddleRow = hasMiddleRow(updatedProfile)
+                    val holder = layoutManager.findViewByPosition(index)
+                        ?.let { configurationListView.getChildViewHolder(it) } as? ConfigurationHolder
+                    val previous = holder?.lastSelfHasMiddleRow
                     notifyItemChanged(index)
-                    //
-                    val oldProfile = configurationList[profile.id]
-                    if (noTraffic && oldProfile != null) {
-                        runOnDefaultDispatcher {
-                            onUpdated(
-                                TrafficData(
-                                    id = profile.id,
-                                    rx = oldProfile.rx,
-                                    tx = oldProfile.tx
-                                )
-                            )
-                        }
+                    if (previous != null && previous != newHasMiddleRow) {
+                        refreshSameRowNeighbours(index)
                     }
                 }
             }
 
-            override suspend fun onUpdated(data: TrafficData) {
+            override suspend fun onUpdated(data: List<TrafficData>) {
                 try {
-                    val index = configurationIdList.indexOf(data.id)
-                    if (index != -1) {
-                        val holder = layoutManager.findViewByPosition(index)
-                            ?.let { configurationListView.getChildViewHolder(it) } as ConfigurationHolder?
-                        if (holder != null) {
-                            onMainDispatcher {
-                                holder.bind(holder.entity, data)
+                    onMainDispatcher {
+                        for (update in data) {
+                            val cached = configurationList[update.id] ?: continue
+                            if (cached.tx == update.tx && cached.rx == update.rx) continue
+
+                            cached.tx = update.tx
+                            cached.rx = update.rx
+                            if (configurationListView.scrollState != RecyclerView.SCROLL_STATE_IDLE) {
+                                pendingTrafficUpdates.add(update.id)
+                            } else {
+                                updateVisibleTraffic(update.id)
                             }
                         }
                     }
@@ -1602,6 +2017,7 @@ class ConfigurationFragment @JvmOverloads constructor(
                     configurationIdList.removeAt(index)
                     configurationList.remove(profileId)
                     notifyItemRemoved(index)
+                    refreshFromPosition(index - 1)
                 }
             }
 
@@ -1634,8 +2050,7 @@ class ConfigurationFragment @JvmOverloads constructor(
                     }
                 }
 
-                configurationList.clear()
-                configurationList.putAll(newProfiles.associateBy { it.id })
+                val newProfileMap = newProfiles.associateBy { it.id }
                 val newProfileIds = newProfiles.map { it.id }
 
                 var selectedProfileIndex = -1
@@ -1646,6 +2061,8 @@ class ConfigurationFragment @JvmOverloads constructor(
                 }
 
                 configurationListView.post {
+                    configurationList.clear()
+                    configurationList.putAll(newProfileMap)
                     configurationIdList.clear()
                     configurationIdList.addAll(newProfileIds)
                     notifyDataSetChanged()
@@ -1668,7 +2085,10 @@ class ConfigurationFragment @JvmOverloads constructor(
             PopupMenu.OnMenuItemClickListener {
 
             lateinit var entity: ProxyEntity
-            
+
+            var lastSelfHasMiddleRow: Boolean? = null
+            var lastBoundTx = Long.MIN_VALUE
+            var lastBoundRx = Long.MIN_VALUE
             private fun showShareMenu(anchor: View, proxyEntity: ProxyEntity) {
                 val popup = PopupMenu(requireContext(), anchor)
                 popup.menuInflater.inflate(R.menu.profile_share_menu, popup.menu)
@@ -1701,7 +2121,8 @@ class ConfigurationFragment @JvmOverloads constructor(
             val profileStatus: TextView = view.findViewById(R.id.profile_status)
 
             val trafficText: TextView = view.findViewById(R.id.traffic_text)
-            val selectedView: LinearLayout = view.findViewById(R.id.selected_view)
+            private val card = view as MaterialCardView
+            private val selectedIndicator: View = view.findViewById(R.id.selected_indicator)
             val editButton: ImageView = view.findViewById(R.id.edit)
             val doubleColumnMenuButton: ImageView = view.findViewById(R.id.double_column_menu)
             val shareLayout: LinearLayout = view.findViewById(R.id.share)
@@ -1709,58 +2130,174 @@ class ConfigurationFragment @JvmOverloads constructor(
             val shareButton: ImageView = view.findViewById(R.id.shareIcon)
             val removeButton: ImageView = view.findViewById(R.id.remove)
 
-            fun bind(proxyEntity: ProxyEntity, trafficData: TrafficData? = null) {
+            init {
+                view.setOnClickListener {
+                    val proxyEntity = entity
+                    if (select) {
+                        (requireActivity() as SelectCallback).returnProfile(proxyEntity.id)
+                    } else {
+                        selectProfile(proxyEntity)
+                    }
+                }
+                profileStatus.setOnClickListener {
+                    val proxyEntity = entity
+                    if (proxyEntity.status == 3) {
+                        alert(proxyEntity.error ?: "<?>").tryToShow()
+                    }
+                }
+                profileStatus.isFocusable = false
+                editButton.setOnClickListener {
+                    val proxyEntity = entity
+                    it.context.startActivity(
+                        proxyEntity.settingIntent(
+                            it.context, proxyGroup.type == GroupType.SUBSCRIPTION
+                        )
+                    )
+                }
+                removeButton.setOnClickListener {
+                    removeProfile(entity)
+                }
+                doubleColumnMenuButton.setOnClickListener {
+                    showDoubleColumnMenu(it, entity)
+                }
+                shareLayout.setOnClickListener {
+                    val proxyEntity = entity
+                    if (!select && proxyEntity.type != ProxyEntity.TYPE_CHAIN) {
+                        showShareMenu(it, proxyEntity)
+                    }
+                }
+            }
+
+            private fun selectProfile(proxyEntity: ProxyEntity) {
+                val pf = parentFragment as? ConfigurationFragment ?: return
+                runOnDefaultDispatcher {
+                    var update: Boolean
+                    var lastSelected: Long
+                    profileAccess.withLock {
+                        update = DataStore.selectedProxy != proxyEntity.id
+                        lastSelected = DataStore.selectedProxy
+                        DataStore.selectedProxy = proxyEntity.id
+                        onMainDispatcher {
+                            pf.updateSelectedProxySnapshot(proxyEntity.id)
+                        }
+                    }
+
+                    if (update) {
+                        ProfileManager.postUpdate(lastSelected, noTraffic = true)
+                        if (DataStore.serviceState.canStop && reloadAccess.tryLock()) {
+                            SagerNet.reloadService()
+                            reloadAccess.unlock()
+                        }
+                    } else if (SagerNet.isTv) {
+                        if (DataStore.serviceState.started) {
+                            SagerNet.stopService()
+                        } else {
+                            SagerNet.startService()
+                        }
+                    }
+                }
+            }
+
+            private fun removeProfile(proxyEntity: ProxyEntity) {
+                if (select) return
+                val currentAdapter = adapter ?: return
+                val index = currentAdapter.configurationIdList.indexOf(proxyEntity.id)
+                if (index < 0) return
+                val removeAction = {
+                    currentAdapter.remove(index)
+                    undoManager.remove(index to proxyEntity)
+                }
+                if (DataStore.confirmProfileDelete) {
+                    AlertDialog.Builder(requireContext())
+                        .setTitle(R.string.delete_confirm_prompt)
+                        .setPositiveButton(R.string.yes) { _, _ -> removeAction() }
+                        .setNegativeButton(R.string.no, null)
+                        .show()
+                } else {
+                    removeAction()
+                }
+            }
+
+            private fun showDoubleColumnMenu(anchor: View, proxyEntity: ProxyEntity) {
+                val popup = PopupMenu(requireContext(), anchor)
+                popup.menuInflater.inflate(R.menu.double_column_item_menu, popup.menu)
+                if (select) popup.menu.removeItem(R.id.action_delete)
+                popup.setOnMenuItemClickListener { menuItem ->
+                    when (menuItem.itemId) {
+                        R.id.action_edit -> {
+                            anchor.context.startActivity(
+                                proxyEntity.settingIntent(
+                                    anchor.context, proxyGroup.type == GroupType.SUBSCRIPTION
+                                )
+                            )
+                            true
+                        }
+                        R.id.action_share -> {
+                            showShareMenu(anchor, proxyEntity)
+                            true
+                        }
+                        R.id.action_delete -> {
+                            removeProfile(proxyEntity)
+                            true
+                        }
+                        else -> false
+                    }
+                }
+                popup.show()
+            }
+
+            private fun applySelected(selected: Boolean) {
+                val ctx = card.context
+                val surface = ctx.getColorAttr(R.attr.colorSurface)
+                if (DataStore.profileCardStyle == 1) {
+                    val primary = ctx.getColorAttr(R.attr.colorPrimary)
+                    selectedIndicator.isVisible = false
+                    card.cardElevation = 0f
+                    card.strokeWidth = ctx.resources.getDimensionPixelSize(
+                        if (selected) R.dimen.card_stroke_width_selected
+                        else R.dimen.card_stroke_width
+                    )
+                    card.strokeColor =
+                        if (selected) primary else ctx.getColour(R.color.card_stroke)
+                    card.setCardBackgroundColor(
+                        if (selected) {
+                            ColorUtils.compositeColors(
+                                ColorUtils.setAlphaComponent(primary, 26), surface
+                            )
+                        } else {
+                            surface
+                        }
+                    )
+                } else {
+                    val primary = ctx.getColorAttr(R.attr.selectedColorPrimary)
+                    selectedIndicator.isVisible = selected
+                    card.strokeWidth = 0
+                    card.cardElevation =
+                        ctx.resources.getDimension(R.dimen.profile_card_elevation_classic)
+                    card.setCardBackgroundColor(
+                        if (selected) {
+                            ColorUtils.compositeColors(
+                                ColorUtils.setAlphaComponent(primary, 20), surface
+                            )
+                        } else {
+                            surface
+                        }
+                    )
+                }
+            }
+
+            fun bind(proxyEntity: ProxyEntity) {
                 val pf = parentFragment as? ConfigurationFragment ?: return
 
                 entity = proxyEntity
+                val bean = proxyEntity.requireBean()
 
-                if (select) {
-                    view.setOnClickListener {
-                        (requireActivity() as SelectCallback).returnProfile(proxyEntity.id)
-                    }
-                } else {
-                    view.setOnClickListener {
-                        runOnDefaultDispatcher {
-                            var update: Boolean
-                            var lastSelected: Long
-                            profileAccess.withLock {
-                                update = DataStore.selectedProxy != proxyEntity.id
-                                lastSelected = DataStore.selectedProxy
-                                DataStore.selectedProxy = proxyEntity.id
-                                onMainDispatcher {
-                                    selectedView.visibility = View.VISIBLE
-                                }
-                            }
-
-                            if (update) {
-                                ProfileManager.postUpdate(lastSelected)
-                                if (DataStore.serviceState.canStop && reloadAccess.tryLock()) {
-                                    SagerNet.reloadService()
-                                    reloadAccess.unlock()
-                                }
-                            } else if (SagerNet.isTv) {
-                                if (DataStore.serviceState.started) {
-                                    SagerNet.stopService()
-                                } else {
-                                    SagerNet.startService()
-                                }
-                            }
-                        }
-
-                    }
-                }
-
-                profileName.text = proxyEntity.displayName()
+                profileName.text = bean.displayName()
                 profileType.text = proxyEntity.displayType()
                 profileType.setTextColor(requireContext().getProtocolColor(proxyEntity.type))
 
-                var rx = proxyEntity.rx
-                var tx = proxyEntity.tx
-                if (trafficData != null) {
-                    // use new data
-                    tx = trafficData.tx
-                    rx = trafficData.rx
-                }
+                val rx = proxyEntity.rx
+                val tx = proxyEntity.tx
 
                 val showTraffic = rx + tx != 0L
                 trafficText.isVisible = showTraffic
@@ -1772,18 +2309,22 @@ class ConfigurationFragment @JvmOverloads constructor(
                     )
                 }
 
-                var address = proxyEntity.displayAddress()
+                var address = if (pf.alwaysShowAddress && bean.name.isNotBlank()) {
+                    bean.displayAddress()
+                } else ""
                 if (showTraffic && address.length >= 30) {
                     address = address.substring(0, 27) + "..."
                 }
 
-                if (proxyEntity.requireBean().name.isBlank() || !pf.alwaysShowAddress) {
-                    address = ""
-                }
-
                 profileAddress.text = address
-                (trafficText.parent as View).isGone =
+                val trafficRowEmpty =
                     (!showTraffic || proxyEntity.status <= 0) && address.isBlank()
+                (trafficText.parent as View).visibility = when {
+                    !trafficRowEmpty -> View.VISIBLE
+                    adapter?.neighbourHasMiddleRow(bindingAdapterPosition) == true -> View.INVISIBLE
+                    else -> View.GONE
+                }
+                lastSelfHasMiddleRow = !trafficRowEmpty
 
                 if (proxyEntity.status <= 0) {
                     if (showTraffic) {
@@ -1807,85 +2348,10 @@ class ConfigurationFragment @JvmOverloads constructor(
                     val err = proxyEntity.error ?: "<?>"
                     val msg = Protocols.genFriendlyMsg(err)
                     profileStatus.text = if (msg != err) msg else getString(R.string.unavailable)
-                    profileStatus.setOnClickListener {
-                        alert(err).tryToShow()
-                    }
-                } else {
-                    profileStatus.setOnClickListener(null)
-                }
-
-                editButton.setOnClickListener {
-                    it.context.startActivity(
-                        proxyEntity.settingIntent(
-                            it.context, proxyGroup.type == GroupType.SUBSCRIPTION
-                        )
-                    )
-                }
-
-                removeButton.setOnClickListener {
-                    adapter?.let { adapter ->
-                        val index = adapter.configurationIdList.indexOf(proxyEntity.id)
-                        if (DataStore.confirmProfileDelete) {
-                            AlertDialog.Builder(requireContext())
-                                .setTitle(R.string.delete_confirm_prompt)
-                                // .setMessage(getString(R.string.delete_confirm_prompt))
-                                .setPositiveButton(R.string.yes) { dialog: DialogInterface, which: Int ->
-                                    adapter.remove(index)
-                                    undoManager.remove(index to proxyEntity)
-                                }
-                                .setNegativeButton(R.string.no, null)
-                                .show()
-                        } else {
-                            adapter.remove(index)
-                            undoManager.remove(index to proxyEntity)
-                        }
-                    }
-                }
-                
-                doubleColumnMenuButton.setOnClickListener {
-                    val popup = PopupMenu(requireContext(), it)
-                    popup.menuInflater.inflate(R.menu.double_column_item_menu, popup.menu)
-                    popup.setOnMenuItemClickListener { menuItem ->
-                        when (menuItem.itemId) {
-                            R.id.action_edit -> {
-                                it.context.startActivity(
-                                    proxyEntity.settingIntent(
-                                        it.context, proxyGroup.type == GroupType.SUBSCRIPTION
-                                    )
-                                )
-                                true
-                            }
-                            R.id.action_share -> {
-                                showShareMenu(it, proxyEntity)
-                                true
-                            }
-                            R.id.action_delete -> {
-                                adapter?.let { adapter ->
-                                    val index = adapter.configurationIdList.indexOf(proxyEntity.id)
-                                    if (DataStore.confirmProfileDelete) {
-                                        AlertDialog.Builder(requireContext())
-                                            .setTitle(R.string.delete_confirm_prompt)
-                                            .setPositiveButton(R.string.yes) { dialog: DialogInterface, which: Int ->
-                                                adapter.remove(index)
-                                                undoManager.remove(index to proxyEntity)
-                                            }
-                                            .setNegativeButton(R.string.no, null)
-                                            .show()
-                                    } else {
-                                        adapter.remove(index)
-                                        undoManager.remove(index to proxyEntity)
-                                    }
-                                }
-                                true
-                            }
-                            else -> false
-                        }
-                    }
-                    popup.show()
                 }
 
                 val selectOrChain = select || proxyEntity.type == ProxyEntity.TYPE_CHAIN
-                val isDoubleColumn = DataStore.groupLayoutMode == 1
+                val isDoubleColumn = layoutManager is FixedGridLayoutManager
                 
                 if (isDoubleColumn) {
                     editButton.isGone = true
@@ -1905,30 +2371,59 @@ class ConfigurationFragment @JvmOverloads constructor(
                     }
                 }
 
-                runOnDefaultDispatcher {
-                    val selected = (selectedItem?.id ?: DataStore.selectedProxy) == proxyEntity.id
-                    val started =
-                        selected && DataStore.serviceState.started && DataStore.currentProfile == proxyEntity.id
-                    onMainDispatcher {
-                        editButton.isEnabled = !started
-                        removeButton.isEnabled = !started
-                        selectedView.visibility = if (selected) View.VISIBLE else View.INVISIBLE
-                    }
+                val selected = pf.isSelectedProfile(proxyEntity.id)
+                val started =
+                    selected && DataStore.serviceState.started && pf.isCurrentProfile(proxyEntity.id)
+                editButton.isEnabled = !started
+                removeButton.isEnabled = !started
+                applySelected(selected)
 
-                    if (!(select || proxyEntity.type == ProxyEntity.TYPE_CHAIN)) {
-                        onMainDispatcher {
-                            shareLayer.setBackgroundColor(Color.TRANSPARENT)
-                            shareButton.setImageResource(R.drawable.ic_social_share)
-                            shareButton.setColorFilter(Color.GRAY)
-                            shareButton.isVisible = true
-
-                            shareLayout.setOnClickListener {
-                                showShareMenu(it, proxyEntity)
-                            }
-                        }
-                    }
+                if (!(select || proxyEntity.type == ProxyEntity.TYPE_CHAIN)) {
+                    shareLayer.setBackgroundColor(Color.TRANSPARENT)
+                    shareButton.setImageResource(R.drawable.ic_social_share)
+                    shareButton.setColorFilter(Color.GRAY)
+                    shareButton.isVisible = true
                 }
 
+                lastBoundTx = tx
+                lastBoundRx = rx
+
+            }
+
+            fun bindProfileState(proxyEntity: ProxyEntity) {
+                if (!::entity.isInitialized || entity.id != proxyEntity.id) {
+                    bind(proxyEntity)
+                    return
+                }
+                val pf = parentFragment as? ConfigurationFragment ?: return
+                val selected = pf.isSelectedProfile(proxyEntity.id)
+                val started = selected && DataStore.serviceState.started &&
+                        pf.isCurrentProfile(proxyEntity.id)
+                editButton.isEnabled = !started
+                removeButton.isEnabled = !started
+                applySelected(selected)
+            }
+
+            fun bindTraffic(proxyEntity: ProxyEntity) {
+                if (entity.id != proxyEntity.id) {
+                    bind(proxyEntity)
+                    return
+                }
+
+                val traffic = view.context.getString(
+                    R.string.traffic,
+                    Formatter.formatFileSize(view.context, proxyEntity.tx),
+                    Formatter.formatFileSize(view.context, proxyEntity.rx)
+                )
+                if (proxyEntity.status <= 0) {
+                    if (profileStatus.text?.toString() != traffic) {
+                        profileStatus.text = traffic
+                    }
+                } else if (trafficText.text?.toString() != traffic) {
+                    trafficText.text = traffic
+                }
+                lastBoundTx = proxyEntity.tx
+                lastBoundRx = proxyEntity.rx
             }
 
             var currentName = ""
